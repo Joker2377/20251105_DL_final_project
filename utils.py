@@ -12,31 +12,50 @@ TRAIN_IMAGE_PATH = "./BCSS_512/train_512/"
 TRAIN_MASK_PATH = "./BCSS_512/train_mask_512/"
 VAL_IMAGE_PATH = "./BCSS_512/val_512/"
 VAL_MASK_PATH = "./BCSS_512/val_mask_512/"
-BATCH_SIZE = 6
-NUM_CLASSES = 22
-LR = 1e-3
-EPOCHS = 100
-WEIGHT_DECAY = 1e-4
+BATCH_SIZE = 8
+NUM_CLASSES = 21
+LR = 6e-5
+EPOCHS = 200
+WEIGHT_DECAY =0.01
 NUM_SUBSET=100000
 NUM_VAL_SUBSET = 100000
-
+TOL = 100
+WARMUP_EPOCHS = 5
 
 # Define transformations using Albumentations
 TRANSFORMS_TRAIN = A.Compose([
+    A.Resize(512, 512),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
+    
+    A.ElasticTransform(p=0.2),
+    A.GridDistortion(p=0.2),
+    A.OpticalDistortion(p=0.2),
+
     A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+    # A.HorizontalFlip(p=0.5),
+    # A.VerticalFlip(p=0.5),
+    # A.RandomRotate90(p=0.5),
+    # A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
     A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-    A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=0.5),
+    # A.ElasticTransform(alpha=1, sigma=50, p=0.5),
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),
 ])
 
 TRANSFORMS_VAL = A.Compose([
+    A.Resize(512, 512),     
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),
 ])
+
+
+def apply_warmup_lr(optimizer, epoch, warmup_epochs=WARMUP_EPOCHS, base_lr=LR):
+    if epoch < warmup_epochs:
+        lr = base_lr * float(epoch + 1) / float(warmup_epochs)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:

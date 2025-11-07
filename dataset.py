@@ -23,7 +23,7 @@ class BCSSDataset(Dataset):
         img_path = os.path.join(self.image_dir, img_name)
         mask_path = os.path.join(self.mask_dir, img_name)
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path).convert("L"), dtype=np.float32)
+        mask = np.array(Image.open(mask_path), dtype=np.float32)
 
         if self.transform is not None:
             augmented = self.transform(image=image, mask=mask)
