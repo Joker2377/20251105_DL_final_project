@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 import segmentation_models_pytorch as smp
 from torchmetrics import JaccardIndex, Accuracy
+from torch.amp import GradScaler, autocast
 
 from utils import *
 from dataset import *
@@ -28,7 +29,7 @@ def main():
     #model = Model(num_channels=3, num_classes=NUM_CLASSES)
     #model = smp.DeepLabV3Plus(classes=NUM_CLASSES)
     model = smp.Segformer(
-        encoder_name="mit_b5",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
+        encoder_name="mit_b2",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
         encoder_depth=5,
         encoder_weights="imagenet",            # 若有 SegFormer 專用 pretrained 權重，改用該權重
         decoder_segmentation_channels=512,     # 頻道數由 256 提升為 512，提升 decoder 表示力
@@ -58,9 +59,9 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr, epochs=num_epochs,
     #                                                 steps_per_epoch=len(train_loader))
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr, epochs=num_epochs,
-                                                    steps_per_epoch=len(train_loader))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
+    scaler = GradScaler()
     torch.cuda.empty_cache()
 
     train_losses, val_losses, val_iou, val_acc, train_iou, train_acc, lrs \
@@ -90,13 +91,21 @@ def main():
             image, mask = image.to(device), mask.to(device).long()
 
             optimizer.zero_grad()
-            output = model(image)
+            with autocast(device_type='cuda'):
+                output = model(image)
+                if isinstance(output, (list, tuple)):
+                    output = output[0]
+                loss = criterion1(output, mask)\
+                     + criterion2(output, mask)
             
-            loss = criterion1(output, mask)\
-                + criterion2(output, mask)
+            scaler.scale(loss).backward()
             
-            loss.backward()
-            optimizer.step()
+            # 使用 scaler 更新權重
+            scaler.step(optimizer)
+            
+            # 更新 scaler
+            scaler.update()
+
             scheduler.step()
 
             m_iou.update(output, mask)
@@ -126,9 +135,12 @@ def main():
                 image, mask = data
                 image, mask = image.to(device), mask.to(device).long()
 
-                output = model(image)
-                loss = criterion1(output, mask)\
-                + criterion2(output, mask)
+                with autocast(device_type='cuda'):
+                    output = model(image)
+                    if isinstance(output, (list, tuple)):
+                        output = output[0]
+                    loss = criterion1(output, mask)\
+                        + criterion2(output, mask)
 
                 m_iou.update(output, mask)
                 accuracy.update(output, mask)

@@ -75,7 +75,17 @@ def main():
     # 而不是 model.state_dict()，所以我們用 torch.load() 直接加載
     try:
         # 初始化模型架構
-        model = smp.UnetPlusPlus(classes=NUM_CLASSES)
+        model = smp.Segformer(
+            encoder_name="mit_b2",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
+            encoder_depth=5,
+            encoder_weights="imagenet",            # 若有 SegFormer 專用 pretrained 權重，改用該權重
+            decoder_segmentation_channels=512,     # 頻道數由 256 提升為 512，提升 decoder 表示力
+            in_channels=3,
+            classes=NUM_CLASSES,
+            activation=None,                       # 返回 logits，搭配混合損失
+            upsampling=4,                          # 輸出尺寸可用後處理 resize；若需要一步到位改為 upsampling=input/4
+            aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.1, "activation":None}
+        )
         # 加載 state_dict
         state_dict = torch.load(model_path, map_location=device)
         
@@ -131,6 +141,8 @@ def main():
 
             # 執行預測
             output = model(input_tensor)
+            if isinstance(output, (list, tuple)):
+                output = output[0]
             
             # 處理輸出
             # output: (1, NUM_CLASSES, H, W)

@@ -12,19 +12,19 @@ TRAIN_IMAGE_PATH = "./BCSS_512/train_512/"
 TRAIN_MASK_PATH = "./BCSS_512/train_mask_512/"
 VAL_IMAGE_PATH = "./BCSS_512/val_512/"
 VAL_MASK_PATH = "./BCSS_512/val_mask_512/"
-BATCH_SIZE = 8
+BATCH_SIZE = 64
 NUM_CLASSES = 21
-LR = 6e-5
+LR = 1e-5
 EPOCHS = 200
 WEIGHT_DECAY =0.01
 NUM_SUBSET=100000
 NUM_VAL_SUBSET = 100000
-TOL = 100
+TOL = 1000
 WARMUP_EPOCHS = 5
 
 # Define transformations using Albumentations
 TRANSFORMS_TRAIN = A.Compose([
-    A.Resize(512, 512),
+    A.Resize(224, 224),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
@@ -45,7 +45,7 @@ TRANSFORMS_TRAIN = A.Compose([
 ])
 
 TRANSFORMS_VAL = A.Compose([
-    A.Resize(512, 512),     
+    A.Resize(224, 224),     
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),
 ])
