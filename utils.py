@@ -12,11 +12,11 @@ TRAIN_IMAGE_PATH = "./BCSS_512/train_512/"
 TRAIN_MASK_PATH = "./BCSS_512/train_mask_512/"
 VAL_IMAGE_PATH = "./BCSS_512/val_512/"
 VAL_MASK_PATH = "./BCSS_512/val_mask_512/"
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 NUM_CLASSES = 21
-LR = 1e-5
-EPOCHS = 200
-WEIGHT_DECAY =0.01
+LR = 3e-5
+EPOCHS = 500
+WEIGHT_DECAY = 0.01
 NUM_SUBSET=100000
 NUM_VAL_SUBSET = 100000
 TOL = 1000
@@ -38,7 +38,7 @@ TRANSFORMS_TRAIN = A.Compose([
     # A.VerticalFlip(p=0.5),
     # A.RandomRotate90(p=0.5),
     # A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-    A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+    #A.GaussianBlur(blur_limit=(3, 7), p=0.5),
     # A.ElasticTransform(alpha=1, sigma=50, p=0.5),
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),

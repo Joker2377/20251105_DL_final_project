@@ -22,8 +22,8 @@ def main():
 
     train_dataset, val_dataset = get_subset(train_dataset, val_dataset)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, num_workers=8, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=5, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, num_workers=5, pin_memory=True)
 
     # configure model
     #model = Model(num_channels=3, num_classes=NUM_CLASSES)
@@ -32,12 +32,12 @@ def main():
         encoder_name="mit_b2",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
         encoder_depth=5,
         encoder_weights="imagenet",            # 若有 SegFormer 專用 pretrained 權重，改用該權重
-        decoder_segmentation_channels=512,     # 頻道數由 256 提升為 512，提升 decoder 表示力
+        decoder_segmentation_channels=256,     # 頻道數由 256 提升為 512，提升 decoder 表示力
         in_channels=3,
         classes=NUM_CLASSES,
         activation=None,                       # 返回 logits，搭配混合損失
         upsampling=4,                          # 輸出尺寸可用後處理 resize；若需要一步到位改為 upsampling=input/4
-        aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.1, "activation":None}
+        aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.2, "activation":None}
     )
 
     model_name = model.__class__.__name__
@@ -51,7 +51,7 @@ def main():
     weight_decay = WEIGHT_DECAY
 
     # loss function
-    #criterion1 = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
+    criterion0 = nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0).to(device)
     criterion1 = smp.losses.FocalLoss(mode='multiclass').to(device)
     criterion2 = smp.losses.DiceLoss(mode='multiclass').to(device)
 
@@ -95,7 +95,8 @@ def main():
                 output = model(image)
                 if isinstance(output, (list, tuple)):
                     output = output[0]
-                loss = criterion1(output, mask)\
+                loss = criterion0(output, mask)\
+                     + criterion1(output, mask)\
                      + criterion2(output, mask)
             
             scaler.scale(loss).backward()
@@ -106,7 +107,6 @@ def main():
             # 更新 scaler
             scaler.update()
 
-            scheduler.step()
 
             m_iou.update(output, mask)
             accuracy.update(output, mask)
@@ -119,7 +119,7 @@ def main():
                                     ) 
             lrs.append(get_lr(optimizer))
             
-        
+        scheduler.step()
         epoch_train_loss = running_loss/len(train_loader)
         epoch_train_iou = m_iou.compute()
         epoch_train_acc = accuracy.compute()
@@ -139,8 +139,9 @@ def main():
                     output = model(image)
                     if isinstance(output, (list, tuple)):
                         output = output[0]
-                    loss = criterion1(output, mask)\
-                        + criterion2(output, mask)
+                    loss = criterion0(output, mask)\
+                     + criterion1(output, mask)\
+                     + criterion2(output, mask)
 
                 m_iou.update(output, mask)
                 accuracy.update(output, mask)

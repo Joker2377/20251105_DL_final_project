@@ -79,12 +79,12 @@ def main():
             encoder_name="mit_b2",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
             encoder_depth=5,
             encoder_weights="imagenet",            # 若有 SegFormer 專用 pretrained 權重，改用該權重
-            decoder_segmentation_channels=512,     # 頻道數由 256 提升為 512，提升 decoder 表示力
+            decoder_segmentation_channels=256,     # 頻道數由 256 提升為 512，提升 decoder 表示力
             in_channels=3,
             classes=NUM_CLASSES,
             activation=None,                       # 返回 logits，搭配混合損失
             upsampling=4,                          # 輸出尺寸可用後處理 resize；若需要一步到位改為 upsampling=input/4
-            aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.1, "activation":None}
+            aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.2, "activation":None}
         )
         # 加載 state_dict
         state_dict = torch.load(model_path, map_location=device)
