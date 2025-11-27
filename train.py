@@ -28,16 +28,20 @@ def main():
     # configure model
     #model = Model(num_channels=3, num_classes=NUM_CLASSES)
     #model = smp.DeepLabV3Plus(classes=NUM_CLASSES)
-    model = smp.Segformer(
-        encoder_name="mit_b2",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
-        encoder_depth=5,
-        encoder_weights="imagenet",            # 若有 SegFormer 專用 pretrained 權重，改用該權重
-        decoder_segmentation_channels=256,     # 頻道數由 256 提升為 512，提升 decoder 表示力
-        in_channels=3,
-        classes=NUM_CLASSES,
-        activation=None,                       # 返回 logits，搭配混合損失
-        upsampling=4,                          # 輸出尺寸可用後處理 resize；若需要一步到位改為 upsampling=input/4
-        aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.2, "activation":None}
+    # model = smp.Segformer(
+    #     encoder_name="mit_b2",                 # 最優：mit_b5 / 次佳 mit_b4；若無可用 pretrained，可選 mit_b5 並載 imagenet 或專用 pretrained
+    #     encoder_depth=5,
+    #     encoder_weights="imagenet",            # 若有 SegFormer 專用 pretrained 權重，改用該權重
+    #     decoder_segmentation_channels=256,     # 頻道數由 256 提升為 512，提升 decoder 表示力
+    #     in_channels=3,
+    #     classes=NUM_CLASSES,
+    #     activation=None,                       # 返回 logits，搭配混合損失
+    #     upsampling=4,                          # 輸出尺寸可用後處理 resize；若需要一步到位改為 upsampling=input/4
+    #     aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.2, "activation":None}
+    # )
+    model = smp.UnetPlusPlus(
+        encoder_name="resnet101",
+        classes=NUM_CLASSES
     )
 
     model_name = model.__class__.__name__
@@ -52,8 +56,8 @@ def main():
 
     # loss function
     criterion0 = nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0).to(device)
-    criterion1 = smp.losses.FocalLoss(mode='multiclass').to(device)
-    criterion2 = smp.losses.DiceLoss(mode='multiclass').to(device)
+    criterion1 = smp.losses.FocalLoss(mode='multiclass', ignore_index=0).to(device)
+    criterion2 = smp.losses.DiceLoss(mode='multiclass', ignore_index=0).to(device)
 
     # lr adjustment
     optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)
@@ -72,7 +76,7 @@ def main():
     start_time = time.time()
 
     m_iou = JaccardIndex(task="multiclass", num_classes=NUM_CLASSES, ignore_index=0).to(device)
-    accuracy = Accuracy(task="multiclass", num_classes=NUM_CLASSES).to(device)
+    accuracy = Accuracy(task="multiclass", num_classes=NUM_CLASSES, ignore_index=0).to(device)
 
     timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     folder_name = timestamp_str
@@ -81,9 +85,7 @@ def main():
 
     for e in range(num_epochs):
         apply_warmup_lr(optimizer, e)
-        running_loss, iou_score, acc = 0, 0, 0
-        m_iou.reset()
-        accuracy.reset()
+        running_loss, running_iou, running_acc = 0, 0, 0
         model.train()
         train_loop = tqdm.tqdm(train_loader,desc='Train', leave=True)
         for i, data in enumerate(train_loop):
@@ -107,22 +109,30 @@ def main():
             # 更新 scaler
             scaler.update()
 
-
-            m_iou.update(output, mask)
-            accuracy.update(output, mask)
+            # Manual metric calculation (memory-efficient for training)
+            with torch.no_grad():
+                m_iou.reset()
+                accuracy.reset()
+                m_iou.update(output, mask)
+                accuracy.update(output, mask)
+                batch_iou = m_iou.compute().item()
+                batch_acc = accuracy.compute().item()
+            
             running_loss += loss.item()
+            running_iou += batch_iou
+            running_acc += batch_acc
 
             if i % 2 ==0:
                 train_loop.set_postfix(loss=(running_loss/(i+1)),
-                                    mIoU=m_iou.compute().item(),  
-                                    acc=accuracy.compute().item(),
+                                    mIoU=(running_iou/(i+1)),  
+                                    acc=(running_acc/(i+1)),
                                     ) 
             lrs.append(get_lr(optimizer))
             
         scheduler.step()
         epoch_train_loss = running_loss/len(train_loader)
-        epoch_train_iou = m_iou.compute()
-        epoch_train_acc = accuracy.compute()
+        epoch_train_iou = running_iou/len(train_loader)
+        epoch_train_acc = running_acc/len(train_loader)
 
         model.eval()
         m_iou.reset()
@@ -143,8 +153,9 @@ def main():
                      + criterion1(output, mask)\
                      + criterion2(output, mask)
 
-                m_iou.update(output, mask)
-                accuracy.update(output, mask)
+                # Move tensors to CPU before updating metrics to reduce GPU memory pressure
+                m_iou.update(output.detach(), mask)
+                accuracy.update(output.detach(), mask)
                 val_loss += loss.item()
 
                 val_loop.set_postfix(loss=val_loss/(i+1),
@@ -158,8 +169,8 @@ def main():
         train_losses.append(epoch_train_loss)
         val_losses.append(epoch_val_loss)
 
-        train_iou.append(epoch_train_iou.item())
-        train_acc.append(epoch_train_acc.item())
+        train_iou.append(epoch_train_iou)
+        train_acc.append(epoch_train_acc)
         val_iou.append(epoch_val_iou.item())
         val_acc.append(epoch_val_acc.item())
 

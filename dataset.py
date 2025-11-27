@@ -15,6 +15,21 @@ class BCSSDataset(Dataset):
         self.mask_dir = mask_dir
         self.transform = transform
         self.images = os.listdir(image_dir)
+        
+        # # Mapping for BCSS classes
+        # # Original values: 0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15, 18, 19, 20
+        # # Missing: 8, 12, 16, 17
+        # self.mapping = np.zeros(21, dtype=np.int64)
+        # for i in range(8): self.mapping[i] = i
+        # self.mapping[9] = 8
+        # self.mapping[10] = 9
+        # self.mapping[11] = 10
+        # self.mapping[13] = 11
+        # self.mapping[14] = 12
+        # self.mapping[15] = 13
+        # self.mapping[18] = 14
+        # self.mapping[19] = 15
+        # self.mapping[20] = 16
 
     def __len__(self):
         return len(self.images)
@@ -24,7 +39,10 @@ class BCSSDataset(Dataset):
         img_path = os.path.join(self.image_dir, img_name)
         mask_path = os.path.join(self.mask_dir, img_name)
         image = np.array(Image.open(img_path).convert("RGB"))
-        mask = np.array(Image.open(mask_path), dtype=np.float32)
+        mask = np.array(Image.open(mask_path))
+        
+        # # Apply mapping
+        # mask = self.mapping[mask]
 
         if self.transform is not None:
             augmented = self.transform(image=image, mask=mask)
