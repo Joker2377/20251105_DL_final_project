@@ -40,7 +40,7 @@ def main():
     #     aux_params={"classes": NUM_CLASSES, "pooling":"avg", "dropout":0.2, "activation":None}
     # )
     model = smp.UnetPlusPlus(
-        encoder_name="resnet101",
+        encoder_name="timm-efficientnet-b5",
         classes=NUM_CLASSES
     )
 
