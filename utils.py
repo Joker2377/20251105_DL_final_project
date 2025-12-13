@@ -1,5 +1,9 @@
+import os
+os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,45 +11,47 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader, Subset
+import tqdm
 
 TRAIN_IMAGE_PATH = "./BCSS_512/train_512/"
 TRAIN_MASK_PATH = "./BCSS_512/train_mask_512/"
 VAL_IMAGE_PATH = "./BCSS_512/val_512/"
 VAL_MASK_PATH = "./BCSS_512/val_mask_512/"
-BATCH_SIZE = 6
-NUM_CLASSES = 22 # label 8, 12, 16, 17 is missing
+# TRAIN_IMAGE_PATH = "./BCSS/train/"
+# TRAIN_MASK_PATH = "./BCSS/train_mask/"
+# VAL_IMAGE_PATH = "./BCSS/val/"
+# VAL_MASK_PATH = "./BCSS/val_mask/"
+BATCH_SIZE = 12
+NUM_CLASSES = 22 # 19 actually
+# NUM_CLASSES = 3
 LR = 1e-3
 EPOCHS = 100
-WEIGHT_DECAY = 0.1
+WEIGHT_DECAY = 1e-3  # Reduced from 1e-2 - was way too high!
 NUM_SUBSET=100000
 NUM_VAL_SUBSET = 100000
-TOL = 1000
-WARMUP_EPOCHS = 10
+TOL = 100 # Reduced tolerance for faster early stopping
+WARMUP_EPOCHS = 5  # Reduced warmup
+GRAD_CLIP = 1.0  # Gradient clipping to prevent exploding gradients
 
-# Define transformations using Albumentations
+# Define transformations using Albumentations - REDUCED augmentation to prevent overfitting
 TRANSFORMS_TRAIN = A.Compose([
-    A.Resize(480, 480),
+    A.RandomResizedCrop(size=(224, 224), scale=(0.7, 1.0)),  # Less aggressive cropping
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
     
-    #A.ElasticTransform(p=0.2),
-    A.GridDistortion(p=0.2),
-    A.OpticalDistortion(p=0.2),
+    # Reduced distortion - was too aggressive
+    A.GridDistortion(p=0.1, distort_limit=0.2),
+    A.OpticalDistortion(p=0.1, distort_limit=0.2),
 
-    A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-    # A.HorizontalFlip(p=0.5),
-    # A.VerticalFlip(p=0.5),
-    # A.RandomRotate90(p=0.5),
-    # A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-    #A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-    # A.ElasticTransform(alpha=1, sigma=50, p=0.5),
+    # Reduced color jittering
+    A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.3),
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),
 ])
 
 TRANSFORMS_VAL = A.Compose([
-    A.Resize(480, 480),     
+    A.Resize(224, 224),     
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),
 ])
@@ -100,7 +106,7 @@ def plot_loss_lr(train_losses, val_losses, lrs, base_path: Path):
 
     plt.tight_layout()
     plt.savefig(base_path / "loss.png")
-    plt.show()
+    #plt.show()
 
 def plot_metrics(train_iou, val_iou, train_acc, val_acc, base_path: Path):
     """
@@ -139,7 +145,7 @@ def plot_metrics(train_iou, val_iou, train_acc, val_acc, base_path: Path):
 
     plt.tight_layout()
     plt.savefig(base_path / "metrics.png")
-    plt.show()
+    #plt.show()
 
 def get_subset(train_dataset, val_dataset, num_train=NUM_SUBSET, num_val=NUM_VAL_SUBSET):
     total_samples = len(train_dataset)
@@ -158,12 +164,52 @@ def get_subset(train_dataset, val_dataset, num_train=NUM_SUBSET, num_val=NUM_VAL
     
     return train_dataset, val_dataset
 
+def compute_class_weights(train_loader, num_classes, device, ignore_index=-100):
+    """Compute class weights from training data to handle class imbalance.
+
+    This function supports PyTorch's default `ignore_index=-100` (meaning no
+    explicit ignored class in the 0..num_classes-1 range). If `ignore_index` is
+    within [0, num_classes-1], that class will be excluded from counts and its
+    weight set to 0.
+    """
+    print("Computing class weights from training data...")
+    class_counts = torch.zeros(num_classes, dtype=torch.float32)
+
+    for images, masks in tqdm.tqdm(train_loader, desc="Computing weights"):
+        # Ensure masks is a tensor we can compare; supports masks on GPU or CPU
+        # masks expected shape: (B, H, W) with integer class ids
+        for c in range(num_classes):
+            # Only count classes that are within the valid range and not the ignored class
+            if ignore_index is not None and 0 <= ignore_index < num_classes and c == ignore_index:
+                continue
+            class_counts[c] += (masks == c).sum().item()
+
+    # Avoid division by zero for any class with zero pixels
+    class_counts = torch.clamp(class_counts, min=1.0)
+
+    # Inverse frequency weighting with smoothing
+    total_pixels = class_counts.sum()
+    class_weights = total_pixels / (num_classes * class_counts)
+
+    # Normalize and cap extreme weights
+    class_weights = class_weights / class_weights.sum() * num_classes
+    class_weights = torch.clamp(class_weights, min=0.1, max=10.0)
+
+    # Only set ignored class weight to 0 if ignore_index refers to a valid class id
+    if ignore_index is not None and 0 <= ignore_index < num_classes:
+        class_weights[ignore_index] = 0.0
+
+    print(f"Class weights: {class_weights}")
+    return class_weights.to(device)
+
 def write_log(info_file_path, timestamp_str, max_lr, num_epochs, weight_decay, \
               min_loss, epoch_val_iou, epoch_val_acc, epoch_train_loss, epoch_train_iou,\
-                epoch_train_acc, e, model_name):
+                epoch_train_acc, e, model_name, encoder_name):
+    global TRAIN_IMAGE_PATH, VAL_IMAGE_PATH
     with open(info_file_path, "w", encoding='utf-8') as f:
             f.write(f"Training run: {timestamp_str}\n")
             f.write(f"Using model: {model_name}\n")
+            f.write(f"Using backbone: {encoder_name}\n")
             f.write("="*40 + "\n\n")
 
             f.write("## Hyperparameters\n")
@@ -175,6 +221,12 @@ def write_log(info_file_path, timestamp_str, max_lr, num_epochs, weight_decay, \
             f.write(f"  - Num Classes: {NUM_CLASSES}\n")
             f.write(f"  - Subset Size: {NUM_SUBSET}\n")
             f.write(f"  - Val Subset Size: {NUM_VAL_SUBSET}\n")
+            f.write("\n")
+
+            # Write dataset paths so runs record which data was used
+            f.write("## Dataset Paths\n")
+            f.write(f"  - Train Image Path: {TRAIN_IMAGE_PATH}\n")
+            f.write(f"  - Val Image Path: {VAL_IMAGE_PATH}\n")
             f.write("\n")
 
             f.write(f"## Best Model Metrics (Found at Epoch {e + 1})\n")
