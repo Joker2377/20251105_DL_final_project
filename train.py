@@ -26,7 +26,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=5, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, num_workers=5, pin_memory=True)
 
-    encoder_name="timm-efficientnet-b3"
+    encoder_name="timm-efficientnet-b5"
     model = smp.UnetPlusPlus(
         encoder_name=encoder_name,
         encoder_weights="imagenet",
@@ -35,7 +35,7 @@ def main():
         decoder_use_batchnorm=True,
         activation=None,
         encoder_depth=4,
-        decoder_channels=(256, 128, 64, 32) # 14x14 from 224x224
+        decoder_channels=(256, 128, 64, 32) # 4x4 from 64x64
     )
 
     model_name = model.__class__.__name__
@@ -183,11 +183,9 @@ def main():
             val_iou.append(epoch_val_iou.item())
             val_acc.append(epoch_val_acc.item())
             
-            # --- START: UPDATE PLOTS IMMEDIATELY ---
             # We call the plot functions here so they update at the end of every epoch
             plot_loss_lr(train_losses, val_losses, lrs, folder_path)
             plot_metrics(train_iou, val_iou, train_acc, val_acc, folder_path)
-            # --- END: UPDATE PLOTS IMMEDIATELY ---
 
             # Save best model
             if epoch_val_iou.item() > best_val_iou:

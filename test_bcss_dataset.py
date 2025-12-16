@@ -8,11 +8,20 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm  # 引入進度條
+from tqdm import tqdm
 
-# 假設 dataset 和 utils 在您的專案結構中是可用的
-from dataset import BCSSDataset
-from utils import TRANSFORMS_VAL, NUM_CLASSES
+# === 引入 torchmetrics ===
+import torchmetrics
+from torchmetrics import MetricCollection
+from torchmetrics.classification import MulticlassJaccardIndex, MulticlassAccuracy, MulticlassF1Score
+
+try:
+    from dataset import BCSSDataset
+    from utils import TRANSFORMS_VAL
+except ImportError:
+    print("警告: 找不到 dataset.py 或 utils.py，請確保這些檔案存在於專案目錄中。")
+    BCSSDataset = None
+    TRANSFORMS_VAL = None
 
 def find_model_path(provided_path: str = None):
     if provided_path:
@@ -24,7 +33,7 @@ def find_model_path(provided_path: str = None):
 
     base = Path('./models')
     if not base.exists():
-        raise FileNotFoundError("No `models/` directory found in project root. Provide --model-path.")
+        raise FileNotFoundError("No `models/` directory found. Provide --model-path.")
 
     candidates = []
     for sub in base.iterdir():
@@ -35,7 +44,7 @@ def find_model_path(provided_path: str = None):
                     candidates.append(p)
 
     if not candidates:
-        raise FileNotFoundError("No model files (best.pt or last.pt) found under `models/`. Provide --model-path.")
+        raise FileNotFoundError("No model files (best.pt/last.pt) found. Provide --model-path.")
 
     candidates = sorted(candidates, key=lambda x: x.stat().st_mtime, reverse=True)
     return str(candidates[0])
@@ -63,9 +72,6 @@ def overlay_image(image_tensor, mask_arr, out_path: Path, alpha=0.5, cmap='tab20
     plt.close()
 
 def plot_iou_distribution(ious, m_iou, out_path: Path, title_prefix=""):
-    """
-    繪製每個類別的 IoU 分佈長條圖
-    """
     plot_values = [x if not np.isnan(x) else 0.0 for x in ious]
     colors = ['skyblue' if not np.isnan(x) else 'lightgray' for x in ious]
     
@@ -73,8 +79,8 @@ def plot_iou_distribution(ious, m_iou, out_path: Path, title_prefix=""):
     bars = plt.bar(range(len(ious)), plot_values, color=colors)
     
     plt.xlabel('Class ID')
-    plt.ylabel('IoU Score')
-    plt.title(f'{title_prefix} Per-class IoU (mIoU: {m_iou:.4f})')
+    plt.ylabel('Score')
+    plt.title(f'{title_prefix} Per-class Metrics (Mean: {m_iou:.4f})')
     plt.xticks(range(len(ious)))
     plt.ylim(0, 1.05)
     plt.grid(axis='y', linestyle='--', alpha=0.7)
@@ -91,126 +97,89 @@ def plot_iou_distribution(ious, m_iou, out_path: Path, title_prefix=""):
     plt.close()
 
 def evaluate_dataset(model, dataloader, device, num_classes):
-    """
-    評估整個 Dataset 的全域 mIoU 和 Accuracy。
-    這是「算總帳」的方式：先加總所有的 Intersection 和 Union，最後才除。
-    """
     model.eval()
     
-    # 初始化全域計數器
-    total_inter = np.zeros(num_classes)
-    total_union = np.zeros(num_classes)
-    total_correct = 0
-    total_pixels = 0
+    metrics = MetricCollection({
+        'iou_per_class': MulticlassJaccardIndex(num_classes=num_classes, average=None),
+        'dice_per_class': MulticlassF1Score(num_classes=num_classes, average=None),
+        'pixel_acc': MulticlassAccuracy(num_classes=num_classes, average='micro')
+    }).to(device)
 
-    print(f"Evaluating on {len(dataloader.dataset)} samples...")
+    print(f"Evaluating on {len(dataloader.dataset)} samples with num_classes={num_classes}...")
     
     with torch.no_grad():
         for images, masks in tqdm(dataloader, desc="Evaluating"):
             images = images.to(device)
-            masks = masks.to(device).long() # BxHxW
+            masks = masks.to(device).long()
             
             output = model(images)
             if isinstance(output, (list, tuple)):
                 output = output[0]
 
-            # 預測
             if output.shape[1] > 1:
-                preds = torch.argmax(output, dim=1) # BxHxW
+                preds = torch.argmax(output, dim=1)
             else:
                 preds = (torch.sigmoid(output) > 0.5).squeeze(1).long()
 
-            # 轉為 numpy 處理 (也可以用純 torch 實作，但 numpy 對邏輯運算很直觀)
-            preds_np = preds.cpu().numpy()
-            gt_np = masks.cpu().numpy()
+            metrics.update(preds, masks)
 
-            # 更新 Pixel Accuracy
-            total_correct += (preds_np == gt_np).sum()
-            total_pixels += gt_np.size
-
-            # 更新每個類別的 Intersection 和 Union
-            for c in range(num_classes):
-                # 這裡使用位元運算加速
-                pred_mask = (preds_np == c)
-                gt_mask = (gt_np == c)
-                
-                inter = (pred_mask & gt_mask).sum()
-                union = (pred_mask | gt_mask).sum()
-                
-                total_inter[c] += inter
-                total_union[c] += union
-
-    # 計算全域指標
-    global_acc = total_correct / total_pixels
+    results = metrics.compute()
     
-    # 計算全域 Per-class IoU
-    # 處理除以零的情況：如果某個類別在整個 Dataset 的 GT 和 Pred 都沒出現 (Union=0)，
-    # 按照標準通常設為 NaN 或忽略，但在訓練指標中通常視為 0 或忽略。
-    # 這裡使用 np.divide 安全除法
-    global_ious = []
-    for c in range(num_classes):
-        if total_union[c] == 0:
-            global_ious.append(float('nan')) # 完全沒出現過的類別
-        else:
-            global_ious.append(total_inter[c] / total_union[c])
-            
-    global_miou = np.nanmean(global_ious)
+    global_acc = results['pixel_acc'].item()
+    iou_per_class = results['iou_per_class'].cpu().numpy()
+    dice_per_class = results['dice_per_class'].cpu().numpy()
     
-    return global_acc, global_miou, global_ious
+    global_miou = np.nanmean(iou_per_class)
+    global_mdice = np.nanmean(dice_per_class)
+
+    metrics.reset()
+    
+    return global_acc, global_miou, iou_per_class, global_mdice, dice_per_class
 
 def main():
-    parser = argparse.ArgumentParser(description='Test BCSS dataset metrics (Global & Single Sample)')
-    parser.add_argument('--model-path', type=str, default=None, help='Path to saved model')
-    parser.add_argument('--image-dir', type=str, default='./BCSS/val/', help='Path to BCSS images')
-    parser.add_argument('--mask-dir', type=str, default='./BCSS/val_mask/', help='Path to BCSS masks')
-    parser.add_argument('--index', type=int, default=0, help='Index of sample to visualize')
-    parser.add_argument('--random', action='store_true', help='Pick a random sample to visualize')
-    parser.add_argument('--device', type=str, default=None, help='Torch device (cpu or cuda)')
-    parser.add_argument('--outdir', type=str, default='./outputs/test_dataset/', help='Output directory')
-    parser.add_argument('--batch-size', type=int, default=4, help='Batch size for evaluation')
-    parser.add_argument('--skip-global', action='store_true', help='Skip global dataset evaluation (fast mode)')
+    parser = argparse.ArgumentParser(description='Test BCSS dataset metrics')
+    parser.add_argument('--model-path', type=str, default=None, help='Path to .pt model')
+    parser.add_argument('--image-dir', type=str, default='./BCSS/val/', help='Path to images')
+    parser.add_argument('--mask-dir', type=str, default='./BCSS/val_mask/', help='Path to masks')
+    parser.add_argument('--num-classes', type=int, default=3, help='Number of classes for metric calculation (Default: 3)')
+    
+    parser.add_argument('--index', type=int, default=0, help='Sample index to visualize')
+    parser.add_argument('--random', action='store_true', help='Visualize random sample')
+    parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--outdir', type=str, default='./outputs/test_dataset/')
+    parser.add_argument('--name', type=str, default=None)
+    parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--skip-global', action='store_true', help='Skip full dataset evaluation')
     args = parser.parse_args()
 
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
 
-    # 1. Load Model
+    # 1. Load Model (Robust Loading)
     model_path = find_model_path(args.model_path)
     print(f"Loading model from: {model_path}")
+    print(f"Target Num Classes: {args.num_classes}")
     
     loaded = None
     try:
         loaded = torch.load(model_path, map_location=device, weights_only=False)
-    except TypeError:
-        try:
-            loaded = torch.load(model_path, map_location=device)
-        except Exception:
-            raise
     except Exception as e:
-        print(f'Warning: full-object load failed ({e}). Trying weights-only load...')
-        try:
-            loaded = torch.load(model_path, map_location=device, weights_only=True)
-        except TypeError:
-            raise
-        except Exception:
-            raise
+        print(f"Standard load failed, trying weights_only=True. Error: {e}")
+        loaded = torch.load(model_path, map_location=device, weights_only=True)
 
     model = None
     if isinstance(loaded, nn.Module):
         model = loaded
     elif isinstance(loaded, dict):
         state_dict = loaded.get('state_dict', loaded)
-        try:
-            import segmentation_models_pytorch as smp
-            print('Building UnetPlusPlus(encoder="timm-efficientnet-b3") to load state_dict')
-            model = smp.UnetPlusPlus(encoder_name='timm-efficientnet-b3', encoder_weights=None, classes=NUM_CLASSES)
-            model.load_state_dict(state_dict)
-        except Exception as e:
-            raise RuntimeError(f'Failed to reconstruct model: {e}')
+        import segmentation_models_pytorch as smp
+        print(f'Building UnetPlusPlus(encoder="timm-efficientnet-b3") with classes={args.num_classes}...')
+        model = smp.UnetPlusPlus(encoder_name='timm-efficientnet-b3', encoder_weights=None, classes=args.num_classes)
+        model.load_state_dict(state_dict)
 
     model = model.to(device)
     model.eval()
 
-    # 2. Setup Dataset & Loader
+    # 2. Setup Dataset
     ds = BCSSDataset(args.image_dir, args.mask_dir, transform=TRANSFORMS_VAL)
     if len(ds) == 0:
         raise RuntimeError(f'No samples found in {args.image_dir}')
@@ -219,20 +188,38 @@ def main():
 
     # Output setup
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    out_dir = Path(args.outdir) / timestamp
+    folder_name = args.name if args.name else timestamp
+    if args.name and (Path(args.outdir) / folder_name).exists():
+        folder_name = f"{folder_name}_{timestamp}"
+
+    out_dir = Path(args.outdir) / folder_name
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / 'report.txt'
 
-    # 3. Global Evaluation (Optional but requested)
-    global_acc, global_miou, global_ious = 0.0, 0.0, []
+    # 3. Global Evaluation
+    global_acc, global_miou, global_ious, global_mdice, global_dices = 0.0, 0.0, [], 0.0, []
+    
     if not args.skip_global:
-        print("\n--- Starting Global Evaluation ---")
-        global_acc, global_miou, global_ious = evaluate_dataset(model, loader, device, NUM_CLASSES)
-        print(f"Global Pixel Acc: {global_acc:.4f}")
-        print(f"Global mIoU:      {global_miou:.4f}")
+        print("\n" + "="*40)
+        print(" STARTING GLOBAL EVALUATION ")
+        print("="*40)
         
-        # Plot Global IoU
-        plot_iou_distribution(global_ious, global_miou, out_dir / 'global_iou_bar_plot.png', title_prefix="Global Dataset")
+        # 傳入 args.num_classes
+        global_acc, global_miou, global_ious, global_mdice, global_dices = evaluate_dataset(model, loader, device, args.num_classes)
+        
+        print("-" * 30)
+        print(f"Global Pixel Acc: {global_acc:.4f}")
+        print(f"Global mDice:     {global_mdice:.4f}")
+        print(f"Global mIoU:      {global_miou:.4f}")
+        print("-" * 30)
+        print("Per-class IoU:")
+        for idx, iou in enumerate(global_ious):
+            val_str = f"{iou:.4f}" if not np.isnan(iou) else "N/A"
+            print(f"  Class {idx}: {val_str}")
+        print("-" * 30)
+        
+        plot_iou_distribution(global_ious, global_miou, out_dir / 'global_iou_bar_plot.png', title_prefix="Global IoU")
+        plot_iou_distribution(global_dices, global_mdice, out_dir / 'global_dice_bar_plot.png', title_prefix="Global Dice")
     else:
         print("\nSkipping global evaluation.")
 
@@ -246,63 +233,65 @@ def main():
     print(f"\n--- Visualizing Sample Index: {idx} ---")
     image, mask = ds[idx]
     image_batch = image.unsqueeze(0).to(device)
+    mask_batch = mask.unsqueeze(0).to(device).long()
 
     with torch.no_grad():
         output = model(image_batch)
         if isinstance(output, (list, tuple)):
             output = output[0]
         if output.shape[1] > 1:
-            pred = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
+            preds = torch.argmax(output, dim=1)
         else:
-            pred = (torch.sigmoid(output).squeeze(0).squeeze(0) > 0.5).cpu().numpy().astype(np.int32)
+            preds = (torch.sigmoid(output) > 0.5).long().squeeze(1)
 
-    gt = mask.cpu().numpy()
+    pred_np = preds.squeeze(0).cpu().numpy()
+    gt_np = mask.cpu().numpy()
+
+    from torchmetrics.functional import jaccard_index, f1_score, accuracy
     
-    # Calculate single sample metrics
-    correct = (pred == gt).sum()
-    sample_acc = correct / gt.size
-    sample_ious = []
-    for c in range(NUM_CLASSES):
-        inter = ((pred == c) & (gt == c)).sum()
-        union = ((pred == c) | (gt == c)).sum()
-        if union == 0:
-            sample_ious.append(float('nan'))
-        else:
-            sample_ious.append(inter / union)
-    sample_miou = np.nanmean(sample_ious)
+    s_acc = accuracy(preds, mask_batch, task="multiclass", num_classes=args.num_classes, average='micro').item()
+    s_miou = jaccard_index(preds, mask_batch, task="multiclass", num_classes=args.num_classes, average='macro').item()
+    s_mdice = f1_score(preds, mask_batch, task="multiclass", num_classes=args.num_classes, average='macro').item()
+    s_ious = jaccard_index(preds, mask_batch, task="multiclass", num_classes=args.num_classes, average='none').cpu().numpy()
 
-    # Save visualizations
-    save_mask(pred, out_dir / 'sample_pred_mask.png')
-    save_mask(gt, out_dir / 'sample_gt_mask.png')
-    overlay_image(image, pred, out_dir / 'sample_overlay_pred.png')
-    overlay_image(image, gt, out_dir / 'sample_overlay_gt.png')
-    plot_iou_distribution(sample_ious, sample_miou, out_dir / 'sample_iou_bar_plot.png', title_prefix=f"Sample {idx}")
+    save_mask(pred_np, out_dir / 'sample_pred_mask.png')
+    save_mask(gt_np, out_dir / 'sample_gt_mask.png')
+    overlay_image(image, pred_np, out_dir / 'sample_overlay_pred.png')
+    overlay_image(image, gt_np, out_dir / 'sample_overlay_gt.png')
+    plot_iou_distribution(s_ious, s_miou, out_dir / 'sample_iou_bar_plot.png', title_prefix=f"Sample {idx}")
 
     # 5. Write Report
     with open(report_path, 'w') as f:
         f.write(f'Model: {model_path}\n')
         f.write(f'Device: {device}\n')
+        f.write(f'Num Classes: {args.num_classes}\n')
         f.write('=' * 30 + '\n')
         
         if not args.skip_global:
             f.write('GLOBAL DATASET METRICS:\n')
             f.write(f'  Global Pixel Acc: {global_acc:.6f}\n')
             f.write(f'  Global mIoU:      {global_miou:.6f}\n')
+            f.write(f'  Global mDice:     {global_mdice:.6f}\n')
             f.write('  Per-class IoU:\n')
             for cid, iou in enumerate(global_ious):
                 val_str = f"{iou:.6f}" if not np.isnan(iou) else "N/A"
                 f.write(f'    Class {cid}: {val_str}\n')
+            f.write('  Per-class Dice:\n')
+            for cid, dice in enumerate(global_dices):
+                val_str = f"{dice:.6f}" if not np.isnan(dice) else "N/A"
+                f.write(f'    Class {cid}: {val_str}\n')
             f.write('=' * 30 + '\n')
 
         f.write(f'SINGLE SAMPLE METRICS (Index {idx}):\n')
-        f.write(f'  Sample Pixel Acc: {sample_acc:.6f}\n')
-        f.write(f'  Sample mIoU:      {sample_miou:.6f}\n')
+        f.write(f'  Sample Pixel Acc: {s_acc:.6f}\n')
+        f.write(f'  Sample mIoU:      {s_miou:.6f}\n')
+        f.write(f'  Sample mDice:     {s_mdice:.6f}\n')
         f.write('  Per-class IoU:\n')
-        for cid, iou in enumerate(sample_ious):
+        for cid, iou in enumerate(s_ious):
             val_str = f"{iou:.6f}" if not np.isnan(iou) else "N/A"
             f.write(f'    Class {cid}: {val_str}\n')
 
-    print(f'Wrote outputs and report to: {out_dir}')
+    print(f'\nWrote outputs and report to: {out_dir}')
 
 if __name__ == '__main__':
     main()

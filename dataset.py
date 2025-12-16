@@ -6,10 +6,6 @@ from utils import *
 
 
 class BCSSDataset(Dataset):
-    """
-    Custom dataset for the Breast Cancer Semantic Segmentation (BCSS) dataset.
-    Corrects the file path issue for the mask images.
-    """
     def __init__(self, image_dir: str, mask_dir: str, transform=None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
