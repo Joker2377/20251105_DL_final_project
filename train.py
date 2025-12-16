@@ -14,7 +14,6 @@ import numpy as np # Added numpy just in case
 
 from utils import *
 from dataset import *
-from model import *
 
 def main():
     # load data
